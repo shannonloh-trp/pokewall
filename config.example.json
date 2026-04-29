@@ -1,6 +1,6 @@
 {
   "asana_token": "PASTE_ASANA_PERSONAL_ACCESS_TOKEN_HERE",
   "project_gid": "PASTE_PROJECT_GID_HERE",
-  "base_image": "~/Development/pokewall/base.png",
+  "base_image": "~/Development/pokewall/base.jpg",
   "done_section_name": "Done"
 }
