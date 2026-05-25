@@ -15,6 +15,9 @@ python3 ~/Development/pokewall/pokewall.py
 # Force regenerate (after editing base.jpg, sprite size, or for testing)
 python3 ~/Development/pokewall/pokewall.py --force
 
+# Always include specific pokemon by pokedex ID (rest filled randomly to the task count)
+python3 ~/Development/pokewall/pokewall.py --pin 25,6,150 --force
+
 # Background polling (every 30s, survives reboots)
 launchctl load -w ~/Library/LaunchAgents/com.shannon.pokewall.plist
 launchctl unload ~/Library/LaunchAgents/com.shannon.pokewall.plist  # stop
@@ -32,7 +35,7 @@ No tests, no build, no linter — single-file Python script.
 The flow each tick (manual or LaunchAgent-driven):
 
 1. **Asana count** — `count_my_completed_tasks()` paginates `/projects/{gid}/tasks` and returns the number of tasks where `assignee.gid == my_gid` AND `completed == true`. Three HTTP calls per tick: `/users/me`, the paginated tasks listing.
-2. **Reveal sync** — `reveal_new(prev_revealed, count, capacity)` returns a list of pokedex IDs of length exactly `min(count, capacity)`. Grows by appending random unrevealed IDs; shrinks by truncating from the end. **The `revealed` list order encodes reveal history** — the last element is the most-recently-revealed and the first to disappear when count drops.
+2. **Reveal sync** — `reveal_new(prev_revealed, count, capacity, pinned)` returns a list of pokedex IDs of length exactly `min(count, capacity)`. Grows by appending random unrevealed IDs; shrinks by truncating from the end. **The `revealed` list order encodes reveal history** — the last element is the most-recently-revealed and the first to disappear when count drops. **Pinned IDs (from `--pin`) are placed at the front**, so they disappear last and — because auto runs preserve the stored order — persist across later ticks without re-passing `--pin` (until the count drops below the number of pins). Auto/LaunchAgent runs pass no pins; they stay fully Asana-driven and random.
 3. **Idempotence guard** — if `revealed == prev` and `--force` is not set, exit without re-rendering.
 4. **Compose** — `compose_wallpaper()` lays sprites onto a padded canvas at their pokedex-grid positions (slot of pid `N` = `((N-1) % cols, (N-1) // cols)`), then crops back to base size. Padding allows sprites larger than the cell to overflow without erroring.
 5. **Refresh** — `refresh_wallpaper()` calls `killall WallpaperAgent`. **It does not call `osascript set picture`** — see "macOS gotchas" below.
@@ -80,7 +83,7 @@ These constraints drove non-obvious design choices. **Don't "simplify" them away
 - **Never call `osascript ... set picture` again.** Doing so pins a wallpaper to the *current* Space and silently disables "Show on all Spaces" — every other Space stops updating. The user re-enables that toggle, the next `set picture` flips it off again. We use `killall WallpaperAgent` instead, which forces re-read of the file at the user-set path without touching the per-Space pinning. NSWorkspace's `setDesktopImageURL` has the same problem — it's not a viable swap.
 - **Base image must match display aspect ratio.** If `base.jpg` aspect ≠ display aspect, macOS "Fill Screen" crops the edges and any sprite in the cropped columns becomes invisible to the user. The current `base.jpg` is `3024×1964` (display-native); `base.original.jpg` is the user's pre-resize source. The script does **not** auto-detect display dims — it uses the base image as the placement canvas, so the base must be sized correctly.
 - **System Python is 3.9** (`/usr/bin/python3`). Dependencies (`requests`, `Pillow`) are installed to the user-site (`~/Library/Python/3.9/lib/python/site-packages`) — not a venv. The LaunchAgent invokes `/usr/bin/python3` directly, so any new dependency must be importable from the system Python's user-site.
-- **Sprite cache is on-disk** under `sprites/{id}.png`, lazy-fetched from the PokeAPI sprites repo URL pattern at first use. ~590 sprites currently cached. Don't bulk-fetch.
+- **Sprite cache is on-disk** under `sprites/{id}.png`, lazy-fetched from the PokeAPI sprites repo URL pattern at first use. After each render, `prune_sprites()` deletes any sprite not in the current revealed set, so the folder mirrors what's on the wallpaper (currently the 22 revealed). Removed/reshuffled pokemon are re-fetched on demand if revealed again. Don't bulk-fetch.
 
 ## File map
 
@@ -89,7 +92,7 @@ These constraints drove non-obvious design choices. **Don't "simplify" them away
 - `config.example.json` — template
 - `state.json` — `{ "revealed": [...] }`, source of truth for current wallpaper contents
 - `base.jpg` — wallpaper canvas at display resolution; `base.original.jpg` is the pre-resize backup
-- `sprites/{id}.png` — PokeAPI sprite cache, lazy-populated
+- `sprites/{id}.png` — PokeAPI sprite cache, lazy-populated and pruned to match the revealed set on each render (see `prune_sprites()`)
 - `out/wallpaper.png` — generated wallpaper (overwritten each render)
 - `log.txt` — LaunchAgent stdout/stderr
 - `run-pokewall.command` — Finder-clickable that runs `pokewall.py --force`; has a custom pokeball icon set via `fileicon`

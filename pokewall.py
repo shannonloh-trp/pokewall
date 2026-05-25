@@ -105,6 +105,24 @@ def fetch_sprite(pid: int) -> Path | None:
     return path
 
 
+def prune_sprites(revealed: list[int]) -> int:
+    """Delete cached sprites for pokemon no longer on the wallpaper.
+
+    Keeps sprites/ in sync with the revealed set; a pokemon that gets removed,
+    reshuffled out, or randomised away has its sprite deleted and is re-fetched
+    on demand by fetch_sprite() if it is revealed again later.
+    """
+    if not SPRITES_DIR.exists():
+        return 0
+    keep = {f"{pid}.png" for pid in revealed}
+    removed = 0
+    for path in SPRITES_DIR.glob("*.png"):
+        if path.name not in keep:
+            path.unlink()
+            removed += 1
+    return removed
+
+
 def grid_dims(canvas_w: int, canvas_h: int) -> tuple[int, int, int]:
     """(cols, rows, cell_size) maximizing slot count subject to cell >= MIN_SPRITE."""
     cols = max(1, canvas_w // MIN_SPRITE)
@@ -113,27 +131,30 @@ def grid_dims(canvas_w: int, canvas_h: int) -> tuple[int, int, int]:
     return cols, rows, cell
 
 
-def reveal_new(revealed: list[int], target_count: int, capacity: int) -> list[int]:
+def reveal_new(revealed: list[int], target_count: int, capacity: int,
+               pinned: list[int] | None = None) -> list[int]:
     """Sync revealed list to exactly `target_count` unique pokedex IDs in 1..capacity.
 
+    Pinned: placed first so they survive shrinks (they disappear last) and
+            persist across later auto runs that preserve the stored order.
     Grow: append randomly-picked unrevealed IDs.
     Shrink: drop from the end (most recently revealed go first).
-    Out-of-range IDs from prior runs are filtered out before sizing.
+    Out-of-range and duplicate IDs are filtered out before sizing.
     """
     seen: set[int] = set()
-    filtered: list[int] = []
-    for pid in revealed:
+    ordered: list[int] = []
+    for pid in list(pinned or []) + list(revealed):
         if 1 <= pid <= capacity and pid not in seen:
             seen.add(pid)
-            filtered.append(pid)
+            ordered.append(pid)
     target = min(capacity, max(0, target_count))
-    if target < len(filtered):
-        return filtered[:target]
-    if target > len(filtered):
+    if target < len(ordered):
+        return ordered[:target]
+    if target > len(ordered):
         pool = [i for i in range(1, capacity + 1) if i not in seen]
         random.shuffle(pool)
-        return filtered + pool[:target - len(filtered)]
-    return filtered
+        return ordered + pool[:target - len(ordered)]
+    return ordered
 
 
 def compose_wallpaper(base_path: Path, revealed: list[int], out_path: Path) -> None:
@@ -186,7 +207,17 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--force", action="store_true",
                         help="Regenerate even if completed-task count is unchanged")
+    parser.add_argument("--pin", default="",
+                        help="Comma-separated pokedex IDs to always include, e.g. 25,6,150. "
+                             "Pinned ones fill first; the rest are random up to the task count.")
     args = parser.parse_args()
+
+    pinned: list[int] = []
+    if args.pin:
+        try:
+            pinned = [int(x) for x in args.pin.split(",") if x.strip()]
+        except ValueError:
+            sys.exit(f"--pin expects comma-separated integers, got: {args.pin!r}")
 
     cfg = load_config()
     state = load_state()
@@ -208,10 +239,14 @@ def main() -> int:
     capacity = cols * rows
 
     prev = state.get("revealed", [])
-    revealed = reveal_new(prev, count, capacity)
+    revealed = reveal_new(prev, count, capacity, pinned)
     diff = len(revealed) - len(prev)
 
     log(f"completed: {count} | revealed: {len(revealed)}/{capacity} ({diff:+d})")
+    if pinned:
+        dropped = [p for p in pinned if p not in revealed]
+        if dropped:
+            log(f"pinned IDs not shown (out of range >{capacity} or beyond count {count}): {dropped}")
 
     if not args.force and revealed == prev:
         return 0
@@ -222,7 +257,11 @@ def main() -> int:
 
     state["revealed"] = revealed
     save_state(state)
-    log(f"wallpaper updated: {len(revealed)} pokemon on grid")
+    pruned = prune_sprites(revealed)
+    msg = f"wallpaper updated: {len(revealed)} pokemon on grid"
+    if pruned:
+        msg += f"; pruned {pruned} unused sprite(s)"
+    log(msg)
     return 0
 
 
