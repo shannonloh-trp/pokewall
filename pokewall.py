@@ -66,27 +66,59 @@ def get_my_gid(token: str) -> str:
     return r.json()["data"]["gid"]
 
 
-def count_my_completed_tasks(token: str, project_gid: str, my_gid: str) -> int:
-    params = {
-        "completed_since": "2000-01-01T00:00:00.000Z",
-        "opt_fields": "completed,assignee",
-        "limit": 100,
-    }
-    url = f"{ASANA_BASE}/projects/{project_gid}/tasks"
-    count = 0
+def _collect_my_completed_gids(token: str, url: str, my_gid: str,
+                               base_params: dict) -> set[str]:
+    """GIDs of my completed tasks across a paginated task listing endpoint."""
+    params = {**base_params, "opt_fields": "completed,assignee", "limit": 100}
+    gids: set[str] = set()
     while True:
         r = requests.get(url, headers=_auth(token), params=params, timeout=30)
         r.raise_for_status()
         body = r.json()
         for task in body.get("data", []):
-            if not task.get("completed"):
-                continue
-            assignee = task.get("assignee") or {}
-            if assignee.get("gid") == my_gid:
-                count += 1
+            if task.get("completed") and (task.get("assignee") or {}).get("gid") == my_gid:
+                gids.add(task["gid"])
         nxt = body.get("next_page")
         if not nxt or not nxt.get("offset"):
-            return count
+            return gids
+        params = {**params, "offset": nxt["offset"]}
+
+
+def my_completed_task_gids(token: str, project_gid: str, my_gid: str) -> set[str]:
+    """GIDs of my completed tasks in the project."""
+    url = f"{ASANA_BASE}/projects/{project_gid}/tasks"
+    return _collect_my_completed_gids(
+        token, url, my_gid, {"completed_since": "2000-01-01T00:00:00.000Z"})
+
+
+def my_completed_task_gids_with_tag(token: str, tag_gid: str, my_gid: str) -> set[str]:
+    """GIDs of my completed tasks carrying the given tag (any project)."""
+    url = f"{ASANA_BASE}/tags/{tag_gid}/tasks"
+    return _collect_my_completed_gids(token, url, my_gid, {})
+
+
+def get_project_workspace(token: str, project_gid: str) -> str:
+    r = requests.get(f"{ASANA_BASE}/projects/{project_gid}", headers=_auth(token),
+                     params={"opt_fields": "workspace"}, timeout=30)
+    r.raise_for_status()
+    return r.json()["data"]["workspace"]["gid"]
+
+
+def find_tag_gid(token: str, workspace_gid: str, tag_name: str) -> str | None:
+    """GID of the workspace tag named `tag_name` (case-insensitive), or None."""
+    target = tag_name.strip().lower()
+    params = {"opt_fields": "name", "limit": 100}
+    url = f"{ASANA_BASE}/workspaces/{workspace_gid}/tags"
+    while True:
+        r = requests.get(url, headers=_auth(token), params=params, timeout=30)
+        r.raise_for_status()
+        body = r.json()
+        for tag in body.get("data", []):
+            if (tag.get("name") or "").strip().lower() == target:
+                return tag["gid"]
+        nxt = body.get("next_page")
+        if not nxt or not nxt.get("offset"):
+            return None
         params = {**params, "offset": nxt["offset"]}
 
 
@@ -225,7 +257,25 @@ def main() -> int:
     try:
         token = cfg["asana_token"]
         my_gid = get_my_gid(token)
-        count = count_my_completed_tasks(token, cfg["project_gid"], my_gid)
+        gids = my_completed_task_gids(token, cfg["project_gid"], my_gid)
+
+        # Also count my completed tasks anywhere that carry the configured tag.
+        # The tag gid is stable, so cache it in state to avoid re-resolving each tick.
+        tag_name = cfg.get("tag_name", "Tech request")
+        tag_cache = state.setdefault("tag_cache", {})
+        tag_gid = tag_cache.get(tag_name)
+        if tag_gid is None:
+            workspace_gid = get_project_workspace(token, cfg["project_gid"])
+            tag_gid = find_tag_gid(token, workspace_gid, tag_name)
+            if tag_gid:
+                tag_cache[tag_name] = tag_gid
+                save_state(state)  # persist cache even if this tick renders nothing
+        if tag_gid:
+            gids |= my_completed_task_gids_with_tag(token, tag_gid, my_gid)
+        else:
+            log(f"tag {tag_name!r} not found; counting project tasks only")
+
+        count = len(gids)
     except requests.RequestException as e:
         log(f"asana fetch failed: {e}")
         return 1

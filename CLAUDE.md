@@ -34,7 +34,10 @@ No tests, no build, no linter — single-file Python script.
 
 The flow each tick (manual or LaunchAgent-driven):
 
-1. **Asana count** — `count_my_completed_tasks()` paginates `/projects/{gid}/tasks` and returns the number of tasks where `assignee.gid == my_gid` AND `completed == true`. Three HTTP calls per tick: `/users/me`, the paginated tasks listing.
+1. **Asana count** — the completed-task count is the size of the **union of two GID sets**, so a task that is both in the project and tagged is counted once:
+   - `my_completed_task_gids()` paginates `/projects/{gid}/tasks` for tasks where `assignee.gid == my_gid` AND `completed == true`.
+   - `my_completed_task_gids_with_tag()` paginates `/tags/{tag_gid}/tasks` for my completed tasks carrying the configured tag (`tag_name`, default `"Tech request"`) — these can live in **any** project, not just the configured one.
+   - The tag's gid is resolved by name via `/workspaces/{ws}/tags` (workspace derived from the project via `get_project_workspace()`), then cached in `state.json` under `tag_cache` so later ticks skip the lookup. Per tick: `/users/me`, the project tasks listing, and the tag tasks listing (plus a one-time workspace + tags lookup on first run / cache miss). If the tag name isn't found, it logs and falls back to project-only counting.
 2. **Reveal sync** — `reveal_new(prev_revealed, count, capacity, pinned)` returns a list of pokedex IDs of length exactly `min(count, capacity)`. Grows by appending random unrevealed IDs; shrinks by truncating from the end. **The `revealed` list order encodes reveal history** — the last element is the most-recently-revealed and the first to disappear when count drops. **Pinned IDs (from `--pin`) are placed at the front**, so they disappear last and — because auto runs preserve the stored order — persist across later ticks without re-passing `--pin` (until the count drops below the number of pins). Auto/LaunchAgent runs pass no pins; they stay fully Asana-driven and random.
 3. **Idempotence guard** — if `revealed == prev` and `--force` is not set, exit without re-rendering.
 4. **Compose** — `compose_wallpaper()` lays sprites onto a padded canvas at their pokedex-grid positions (slot of pid `N` = `((N-1) % cols, (N-1) // cols)`), then crops back to base size. Padding allows sprites larger than the cell to overflow without erroring.
@@ -69,11 +72,12 @@ Two constants near the top of `pokewall.py` control sizing: `MIN_SPRITE` (cell f
   "asana_token":       "Asana Personal Access Token",
   "project_gid":       "Numeric segment after /project/ in the Asana board URL",
   "base_image":        "~/Development/pokewall/base.jpg",
+  "tag_name":          "Tech request",  // optional; completed tasks with this tag also count (default "Tech request")
   "done_section_name": "Completed"   // legacy, currently unused (kept for history)
 }
 ```
 
-Counting is by `assignee=me AND completed=true` in the project, not by section membership — the `done_section_name` field is dead code preserved for context.
+Counting is by `assignee=me AND completed=true`: tasks in the project, **plus** tasks anywhere carrying the `tag_name` tag, unioned by task gid (no double-counting). It is not by section membership — the `done_section_name` field is dead code preserved for context.
 
 ## macOS gotchas (load-bearing knowledge)
 

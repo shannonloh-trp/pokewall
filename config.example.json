@@ -2,5 +2,6 @@
   "asana_token": "PASTE_ASANA_PERSONAL_ACCESS_TOKEN_HERE",
   "project_gid": "PASTE_PROJECT_GID_HERE",
   "base_image": "~/Development/pokewall/base.jpg",
+  "tag_name": "Tech request",
   "done_section_name": "Done"
 }
